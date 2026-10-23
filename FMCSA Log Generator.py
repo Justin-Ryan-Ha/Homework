@@ -1,7 +1,7 @@
 ﻿"""Data models and FMCSA code mappings for ELD output files."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import csv
 import argparse
 from pathlib import Path
@@ -254,6 +254,84 @@ def get_active_duty_status_events(events: list[ELDEvent]) -> list[ELDEvent]:
         for event in events
         if event.event_type == 1 and event.event_record_status == 1
     ]
+
+
+def build_daily_timelines(
+    events: list[ELDEvent],
+) -> dict[date, list[DutyStatusInterval]]:
+    """Build 24-hour duty-status intervals for each date represented by events.
+
+    A day's starting status carries forward from the latest active duty-status
+    event on the previous day. The earliest date defaults to off duty because
+    this input contains no prior-day context. Dates with no active duty-status
+    events are represented as off duty for the full 0–24 hour day.
+    """
+    active_events = get_active_duty_status_events(events)
+    if not active_events:
+        return {}
+
+    # Convert FMCSA event codes (1–4) to readable duty-status labels.
+    code_to_status = {code: status for status, code in DUTY_STATUS_CODES.items()}
+    events_by_date: dict[date, list[ELDEvent]] = {}
+    for event in active_events:
+        events_by_date.setdefault(event.event_datetime.date(), []).append(event)
+
+    first_day = min(events_by_date)
+    last_day = max(events_by_date)
+    daily_timelines: dict[date, list[DutyStatusInterval]] = {}
+    carried_status = "off_duty"
+    current_day = first_day
+
+    while current_day <= last_day:
+        day_events = sorted(
+            events_by_date.get(current_day, []),
+            key=lambda event: event.event_datetime,
+        )
+
+        # The requested fallback for a date without any active duty-status event.
+        if not day_events:
+            daily_timelines[current_day] = [
+                DutyStatusInterval(start_hour=0.0, end_hour=24.0, status="off_duty")
+            ]
+            carried_status = "off_duty"
+            current_day += timedelta(days=1)
+            continue
+
+        intervals: list[DutyStatusInterval] = []
+        interval_start = 0.0
+        status = carried_status
+
+        for event in day_events:
+            try:
+                next_status = code_to_status[event.event_code]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Event {event.event_sequence_id_number} has unknown duty-status "
+                    f"event code {event.event_code}."
+                ) from exc
+
+            event_hour = (
+                event.event_datetime.hour
+                + event.event_datetime.minute / 60
+                + event.event_datetime.second / 3600
+            )
+
+            # Close the preceding interval at this event's time; skip zero-length spans.
+            if event_hour > interval_start:
+                intervals.append(
+                    DutyStatusInterval(interval_start, event_hour, status)
+                )
+            status = next_status
+            interval_start = event_hour
+
+        # The last status of the day extends to midnight and becomes tomorrow's start.
+        if interval_start < 24.0:
+            intervals.append(DutyStatusInterval(interval_start, 24.0, status))
+        daily_timelines[current_day] = intervals
+        carried_status = status
+        current_day += timedelta(days=1)
+
+    return daily_timelines
 
 
 def main() -> int:
