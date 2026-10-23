@@ -234,6 +234,19 @@ def read_eld_csv(csv_path: str | Path) -> ELDParseResult:
     )
 
 
+def get_active_duty_status_events(events: list[ELDEvent]) -> list[ELDEvent]:
+    """Return active duty-status change records for use in ELD charts.
+
+    FMCSA event type 1 represents a duty-status change, and record status 1
+    means the event is active. The input order is preserved.
+    """
+    return [
+        event
+        for event in events
+        if event.event_type == 1 and event.event_record_status == 1
+    ]
+
+
 def main() -> int:
     """Parse an FMCSA ELD CSV selected by the user on the command line."""
     parser = argparse.ArgumentParser(
