@@ -345,6 +345,140 @@ def build_daily_timelines(
     return daily_timelines
 
 
+def generate_daily_eld_charts(
+    csv_path: str | Path,
+    output_dir: str | Path | None = None,
+) -> dict[date, Path]:
+    """Draw and save one 24-hour duty-status chart for each date in an ELD CSV.
+
+    Active duty-status changes are drawn on the four FMCSA status rows. The
+    chart uses the parsed sections and event dataclasses above; it does not
+    attempt to draw a full roadside inspection report.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError(
+            "Matplotlib is required to draw charts. Install project dependencies "
+            "with `python -m pip install -r requirements.txt`."
+        ) from exc
+
+    parse_result = read_eld_csv(csv_path)
+    if not parse_result.events:
+        return {}
+
+    # Include dates containing non-duty ELD events so they still receive a chart.
+    event_dates = [event.event_datetime.date() for event in parse_result.events]
+    first_date, last_date = min(event_dates), max(event_dates)
+    timelines = build_daily_timelines(
+        parse_result.events, start_date=first_date, end_date=last_date
+    )
+    chart_events = get_active_duty_status_events(parse_result.events)
+
+    destination = Path(output_dir) if output_dir else Path(csv_path).parent / "eld_charts"
+    destination.mkdir(parents=True, exist_ok=True)
+
+    # Place the chart rows in conventional order, with Off Duty at the top.
+    row_for_status = {
+        "off_duty": 3,
+        "sleeper_berth": 2,
+        "driving": 1,
+        "on_duty_not_driving": 0,
+    }
+    label_for_status = {
+        "off_duty": "Off Duty",
+        "sleeper_berth": "Sleeper Berth",
+        "driving": "Driving",
+        "on_duty_not_driving": "On Duty Not Driving",
+    }
+    color_for_status = {
+        "off_duty": "#2563eb",
+        "sleeper_berth": "#7c3aed",
+        "driving": "#dc2626",
+        "on_duty_not_driving": "#d97706",
+    }
+
+    chart_paths: dict[date, Path] = {}
+    for chart_date, intervals in timelines.items():
+        fig, ax = plt.subplots(figsize=(11, 5.2))
+        ax.set_xlim(0, 24)
+        ax.set_ylim(-0.5, 3.5)
+        ax.set_yticks([3, 2, 1, 0], [
+            label_for_status["off_duty"],
+            label_for_status["sleeper_berth"],
+            label_for_status["driving"],
+            label_for_status["on_duty_not_driving"],
+        ])
+        ax.set_xticks(range(25))
+        # Quarter-hour minor lines make it easier to read short duty intervals.
+        ax.set_xticks([quarter / 4 for quarter in range(97)], minor=True)
+        ax.grid(which="major", axis="x", color="#64748b", linewidth=0.7)
+        ax.grid(which="minor", axis="x", color="#cbd5e1", linewidth=0.35)
+        ax.grid(which="major", axis="y", color="#94a3b8", linewidth=0.7)
+        ax.set_axisbelow(True)
+
+        prior_interval = None
+        for interval in intervals:
+            y = row_for_status[interval.status]
+            ax.hlines(
+                y,
+                interval.start_hour,
+                interval.end_hour,
+                color=color_for_status[interval.status],
+                linewidth=7,
+                zorder=3,
+            )
+            if prior_interval is not None and prior_interval.status != interval.status:
+                ax.vlines(
+                    interval.start_hour,
+                    row_for_status[prior_interval.status],
+                    y,
+                    color="#1f2937",
+                    linewidth=1.5,
+                    zorder=4,
+                )
+            prior_interval = interval
+
+        # Dot each active type-1 event on the row for its resulting duty status.
+        day_events = [
+            event for event in chart_events
+            if event.event_datetime.date() == chart_date
+        ]
+        code_to_status = {code: status for status, code in DUTY_STATUS_CODES.items()}
+        for event in day_events:
+            resulting_status = code_to_status.get(event.event_code)
+            if resulting_status is None:
+                continue
+            event_hour = (
+                event.event_datetime.hour
+                + event.event_datetime.minute / 60
+                + event.event_datetime.second / 3600
+            )
+            ax.plot(
+                event_hour,
+                row_for_status[resulting_status],
+                marker="o",
+                markersize=4,
+                markerfacecolor="white",
+                markeredgecolor="#111827",
+                linestyle="none",
+                zorder=5,
+            )
+
+        ax.set_title(f"ELD Duty Status — {chart_date:%Y-%m-%d}")
+        ax.set_xlabel("Hour of 24-hour period")
+        ax.set_ylabel("Duty Status")
+        ax.set_xticklabels([f"{hour:02d}:00" for hour in range(25)], rotation=45, ha="right")
+        fig.tight_layout()
+
+        chart_path = destination / f"eld_chart_{chart_date.isoformat()}.png"
+        fig.savefig(chart_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        chart_paths[chart_date] = chart_path
+
+    return chart_paths
+
+
 def main() -> int:
     """Parse an FMCSA ELD CSV selected by the user on the command line."""
     parser = argparse.ArgumentParser(
@@ -354,6 +488,16 @@ def main() -> int:
         "csv_file",
         type=Path,
         help="Path to the ELD output CSV file to parse.",
+    )
+    parser.add_argument(
+        "--charts",
+        action="store_true",
+        help="Draw a daily duty-status chart for each date in the CSV.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Folder for chart images (default: ./eld_charts beside the CSV).",
     )
     args = parser.parse_args()
 
@@ -373,6 +517,18 @@ def main() -> int:
             print(f"  - {issue}")
     else:
         print("No missing data or malformed event rows were found.")
+
+    if args.charts:
+        try:
+            chart_paths = generate_daily_eld_charts(args.csv_file, args.output_dir)
+        except RuntimeError as exc:
+            parser.error(str(exc))
+        if chart_paths:
+            print("Charts saved:")
+            for chart_path in chart_paths.values():
+                print(f"  {chart_path}")
+        else:
+            print("No parsed ELD events were available to chart.")
 
     return 0
 
