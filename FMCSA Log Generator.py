@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 import csv
+import argparse
 from pathlib import Path
 from typing import Optional
 
@@ -231,5 +232,41 @@ def read_eld_csv(csv_path: str | Path) -> ELDParseResult:
         events=events,
         missing_data=tuple(missing_data),
     )
+
+
+def main() -> int:
+    """Parse an FMCSA ELD CSV selected by the user on the command line."""
+    parser = argparse.ArgumentParser(
+        description="Read and parse an FMCSA-structured ELD output CSV."
+    )
+    parser.add_argument(
+        "csv_file",
+        type=Path,
+        help="Path to the ELD output CSV file to parse.",
+    )
+    args = parser.parse_args()
+
+    try:
+        result = read_eld_csv(args.csv_file)
+    except OSError as exc:
+        parser.error(f"could not open '{args.csv_file}': {exc}")
+
+    print(f"Parsed {len(result.events)} ELD event(s).")
+    print("Sections found:")
+    for section_name, rows in result.sections.items():
+        print(f"  {section_name}: {len(rows)} row(s)")
+
+    if result.missing_data:
+        print("Data issues to review:")
+        for issue in result.missing_data:
+            print(f"  - {issue}")
+    else:
+        print("No missing data or malformed event rows were found.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
