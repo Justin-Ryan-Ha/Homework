@@ -258,16 +258,23 @@ def get_active_duty_status_events(events: list[ELDEvent]) -> list[ELDEvent]:
 
 def build_daily_timelines(
     events: list[ELDEvent],
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> dict[date, list[DutyStatusInterval]]:
-    """Build 24-hour duty-status intervals for each date represented by events.
+    """Build 24-hour duty-status intervals for dates represented by events.
 
     A day's starting status carries forward from the latest active duty-status
     event on the previous day. The earliest date defaults to off duty because
     this input contains no prior-day context. Dates with no active duty-status
-    events are represented as off duty for the full 0–24 hour day.
+    events are represented as off duty for the full 0–24 hour day. Optional
+    date bounds let callers request days with no events, including when the
+    input event list is empty.
     """
     active_events = get_active_duty_status_events(events)
-    if not active_events:
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise ValueError("start_date must be on or before end_date")
+
+    if not active_events and start_date is None and end_date is None:
         return {}
 
     # Convert FMCSA event codes (1–4) to readable duty-status labels.
@@ -276,8 +283,12 @@ def build_daily_timelines(
     for event in active_events:
         events_by_date.setdefault(event.event_datetime.date(), []).append(event)
 
-    first_day = min(events_by_date)
-    last_day = max(events_by_date)
+    event_days = list(events_by_date)
+    # A lone bound describes one day; two bounds request the inclusive range.
+    requested_start = start_date or end_date
+    requested_end = end_date or start_date
+    first_day = min([*event_days, *([requested_start] if requested_start else [])])
+    last_day = max([*event_days, *([requested_end] if requested_end else [])])
     daily_timelines: dict[date, list[DutyStatusInterval]] = {}
     carried_status = "off_duty"
     current_day = first_day
