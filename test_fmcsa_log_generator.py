@@ -4,6 +4,7 @@ from datetime import date, datetime
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -52,6 +53,7 @@ class BuildDailyTimelinesTests(unittest.TestCase):
         )
 
     def test_full_offline_day_with_no_events(self):
+        """An explicitly requested day without events becomes off duty all day."""
         offline_day = date(2026, 10, 12)
 
         timelines = fmcsa.build_daily_timelines(
@@ -70,6 +72,7 @@ class BuildDailyTimelinesTests(unittest.TestCase):
         )
 
     def test_sleeper_berth_for_ten_hours(self):
+        """Events out of file order are sorted into intervals with a 10-hour SB span."""
         day = date(2026, 10, 12)
         events = [
             self.make_event(day, 17, 0, 1),  # Off duty at 17:00.
@@ -98,6 +101,7 @@ class BuildDailyTimelinesTests(unittest.TestCase):
         )
 
     def test_next_day_begins_with_previous_day_final_status(self):
+        """The last status on one day carries across midnight to the next day."""
         first_day = date(2026, 10, 12)
         second_day = date(2026, 10, 13)
         events = [
@@ -120,6 +124,7 @@ class BuildDailyTimelinesTests(unittest.TestCase):
         )
 
     def test_event_at_midnight_starts_day_at_new_status_without_zero_span(self):
+        """A status change at 00:00 applies immediately without an empty interval."""
         day = date(2026, 10, 12)
         events = [self.make_event(day, 0, 0, 4)]
 
@@ -137,6 +142,7 @@ class BuildDailyTimelinesTests(unittest.TestCase):
         )
 
     def test_inactive_and_non_duty_events_do_not_change_timeline(self):
+        """Only active event-type-1 records affect the duty-status timeline."""
         day = date(2026, 10, 12)
         events = [
             self.make_event(day, 8, 0, 3, record_status=2),
@@ -159,6 +165,7 @@ class BuildDailyTimelinesTests(unittest.TestCase):
         )
 
     def test_unknown_duty_status_event_code_raises_clear_error(self):
+        """An unknown duty-status code fails clearly instead of being mischarted."""
         day = date(2026, 10, 12)
         event = self.make_event(day, 8, 0, 9, sequence_id="ABCD")
 
@@ -166,10 +173,91 @@ class BuildDailyTimelinesTests(unittest.TestCase):
             fmcsa.build_daily_timelines([event])
 
     def test_start_date_after_end_date_is_rejected(self):
+        """Invalid requested date ranges are rejected with a helpful error."""
         with self.assertRaisesRegex(ValueError, "start_date must be on or before end_date"):
             fmcsa.build_daily_timelines(
                 [], start_date=date(2026, 10, 13), end_date=date(2026, 10, 12)
             )
+
+
+class ReadEldCsvTests(unittest.TestCase):
+    VALID_EVENT_ROW = (
+        "00AB,1,2,1,3,101226,081530,3709,47.8,50.91,-114.10,0,1,2,0,1,05,02"
+    )
+
+    def read_csv_text(self, csv_text: str):
+        """Write test CSV contents to a temporary file and parse that file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "eld_output.csv"
+            csv_path.write_text(csv_text, encoding="utf-8")
+            return fmcsa.read_eld_csv(csv_path)
+
+    def test_reads_section_headings_and_parses_eld_event_fields(self):
+        """Section titles are identified and the ELD event columns are parsed."""
+        result = self.read_csv_text(
+            "ELD File Header Segment:\nheader,value\n"
+            "User List:\n1,D,Driver,Test,00\n"
+            f"ELD Event List:\n{self.VALID_EVENT_ROW}\n"
+        )
+
+        self.assertEqual(
+            set(result.sections),
+            {"ELD File Header Segment", "User List", "ELD Event List"},
+        )
+        self.assertEqual(len(result.events), 1)
+        event = result.events[0]
+        self.assertEqual(event.event_sequence_id_number, "00AB")
+        self.assertEqual(event.event_code, 3)
+        self.assertEqual(event.event_datetime, datetime(2026, 10, 12, 8, 15, 30))
+        self.assertEqual(event.event_latitude, "50.91")
+        self.assertFalse(result.missing_data)
+
+    def test_ignores_empty_and_whitespace_only_rows(self):
+        """Empty CSV rows are skipped rather than stored or reported as errors."""
+        result = self.read_csv_text(
+            "ELD Event List:\n\n   ,   \n"
+            f"{self.VALID_EVENT_ROW}\n\n"
+        )
+
+        # Only the event row is retained; blank rows do not become records/issues.
+        self.assertEqual(len(result.sections["ELD Event List"]), 1)
+        self.assertEqual(len(result.events), 1)
+        self.assertFalse(result.missing_data)
+
+    def test_reports_blank_field_but_keeps_parseable_event(self):
+        """A blank data field is reported even when the rest of the event parses."""
+        row_with_missing_latitude = self.VALID_EVENT_ROW.replace(
+            "50.91,-114.10", ",-114.10"
+        )
+        result = self.read_csv_text(f"ELD Event List:\n{row_with_missing_latitude}\n")
+
+        # The row is still usable for other fields, and the missing value is reported.
+        self.assertEqual(len(result.events), 1)
+        self.assertTrue(any("missing latitude" in issue for issue in result.missing_data))
+
+    def test_reports_wrong_field_count_and_skips_that_event(self):
+        """Rows that do not have all 18 event fields are reported and skipped."""
+        short_row = ",".join(self.VALID_EVENT_ROW.split(",")[:-1])
+        result = self.read_csv_text(f"ELD Event List:\n{short_row}\n")
+
+        self.assertFalse(result.events)
+        self.assertTrue(any("expected 18 event fields" in issue for issue in result.missing_data))
+
+    def test_reports_invalid_numeric_event_field(self):
+        """A non-numeric code in an integer field is reported and not parsed."""
+        invalid_row = self.VALID_EVENT_ROW.replace(",1,2,1,3,", ",x,2,1,3,")
+        result = self.read_csv_text(f"ELD Event List:\n{invalid_row}\n")
+
+        self.assertFalse(result.events)
+        self.assertTrue(any("could not be parsed" in issue for issue in result.missing_data))
+
+    def test_reports_missing_eld_event_section(self):
+        """A file without an ELD Event List section reports that missing section."""
+        result = self.read_csv_text("User List:\n1,D,Driver,Test,00\n")
+
+        self.assertFalse(result.events)
+        self.assertTrue(any("missing the ELD Event List section" in issue
+                            for issue in result.missing_data))
 
 
 if __name__ == "__main__":
