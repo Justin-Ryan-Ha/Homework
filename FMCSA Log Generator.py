@@ -116,6 +116,15 @@ class ELDEvent:
 
 
 @dataclass(frozen=True)
+class DutyStatusInterval:
+    """A duty-status span within one day's 24-hour timeline."""
+
+    start_hour: float
+    end_hour: float
+    status: str
+
+
+@dataclass(frozen=True)
 class ELDParseResult:
     """Sections and parsed events found in an FMCSA ELD CSV output file."""
 
