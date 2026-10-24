@@ -265,10 +265,10 @@ def build_daily_timelines(
 
     A day's starting status carries forward from the latest active duty-status
     event on the previous day. The earliest date defaults to off duty because
-    this input contains no prior-day context. Dates with no active duty-status
-    events are represented as off duty for the full 0–24 hour day. Optional
-    date bounds let callers request days with no events, including when the
-    input event list is empty.
+    this input contains no prior-day context. A date with no active
+    duty-status events carries the latest known status for the full 0–24 hour
+    day. Optional date bounds let callers request days with no events,
+    including when the input event list is empty.
     """
     active_events = get_active_duty_status_events(events)
     if start_date is not None and end_date is not None and start_date > end_date:
@@ -299,12 +299,15 @@ def build_daily_timelines(
             key=lambda event: event.event_datetime,
         )
 
-        # The requested fallback for a date without any active duty-status event.
+        # With no change recorded, the last known duty status remains in effect.
         if not day_events:
             daily_timelines[current_day] = [
-                DutyStatusInterval(start_hour=0.0, end_hour=24.0, status="off_duty")
+                DutyStatusInterval(
+                    start_hour=0.0,
+                    end_hour=24.0,
+                    status=carried_status,
+                )
             ]
-            carried_status = "off_duty"
             current_day += timedelta(days=1)
             continue
 
