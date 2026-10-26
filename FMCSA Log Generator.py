@@ -125,6 +125,18 @@ class DutyStatusInterval:
 
 
 @dataclass(frozen=True)
+class DailyEventRecord:
+    """One timestamped ELD event row for the per-day event ledger."""
+
+    timestamp: datetime
+    category: str
+    event: str
+    sequence_id: str
+    record_origin: str
+    details: str
+
+
+@dataclass(frozen=True)
 class ELDParseResult:
     """Sections and parsed events found in an FMCSA ELD CSV output file."""
 
@@ -256,6 +268,278 @@ def get_active_duty_status_events(events: list[ELDEvent]) -> list[ELDEvent]:
     ]
 
 
+def build_daily_event_records(
+    parse_result: ELDParseResult,
+) -> dict[date, list[DailyEventRecord]]:
+    """Collect every event record by date and sort each day's rows by time.
+
+    The source ELD file stores event types 1–3, certifications, malfunctions
+    and diagnostics, logins/logouts, engine power events, and unidentified
+    profile events in separate sections. Annotation rows are supplementary
+    details, so they are attached to their matching event instead of counted
+    as separate events.
+    """
+    records_by_day: dict[date, list[DailyEventRecord]] = {}
+
+    def parse_timestamp(
+        row: tuple[str, ...], date_index: int, time_index: int
+    ) -> datetime | None:
+        try:
+            return datetime.strptime(
+                row[date_index] + row[time_index], "%m%d%y%H%M%S"
+            )
+        except (IndexError, ValueError):
+            return None
+
+    def append_record(
+        timestamp: datetime | None,
+        category: str,
+        event: str,
+        sequence_id: str,
+        record_origin: str = "",
+        details: str = "",
+    ) -> None:
+        if timestamp is None:
+            return
+        records_by_day.setdefault(timestamp.date(), []).append(
+            DailyEventRecord(
+                timestamp=timestamp,
+                category=category,
+                event=event,
+                sequence_id=sequence_id,
+                record_origin=record_origin,
+                details=details,
+            )
+        )
+
+    event_type_names = {
+        1: "Duty Status Change",
+        2: "Intermediate Log",
+        3: "Special Driving Category",
+    }
+    code_to_duty_status = {
+        code: status.replace("_", " ").title()
+        for status, code in DUTY_STATUS_CODES.items()
+    }
+    event_code_descriptions = {
+        2: {
+            1: "Intermediate log (conventional location precision)",
+            2: "Intermediate log (reduced location precision)",
+        },
+        3: {
+            0: "Special driving category cleared",
+            1: "Authorized personal use of CMV",
+            2: "Yard moves",
+        },
+        7: {
+            1: "ELD malfunction logged",
+            2: "ELD malfunction cleared",
+            3: "Data diagnostic event logged",
+            4: "Data diagnostic event cleared",
+        },
+    }
+    status_labels = {
+        1: "Active",
+        2: "Inactive - Changed",
+        3: "Inactive - Change Requested",
+        4: "Inactive - Change Rejected",
+    }
+    origin_labels = {
+        code: label.replace("_", " ").title()
+        for label, code in EVENT_RECORD_ORIGIN_CODES.items()
+    }
+
+    # Attach comments and manual location descriptions to their source event ID.
+    annotations: dict[str, str] = {}
+    for row in parse_result.sections.get("ELD Event Annotations or Comments", ()):
+        if not row:
+            continue
+        details = []
+        if len(row) > 2 and row[2]:
+            details.append(row[2])
+        if len(row) > 5 and row[5]:
+            details.append(f"Location: {row[5]}")
+        if details:
+            annotations[row[0]] = "; ".join(details)
+
+    # Main event list: event sequence, status, origin, type, code, date, time...
+    for event in parse_result.events:
+        if event.event_type == 1:
+            description = code_to_duty_status.get(
+                event.event_code, f"Unknown duty status code {event.event_code}"
+            )
+        else:
+            description = event_code_descriptions.get(event.event_type, {}).get(
+                event.event_code,
+                f"{event_type_names.get(event.event_type, 'ELD event')} code "
+                f"{event.event_code}",
+            )
+        details = annotations.get(event.event_sequence_id_number, "")
+        try:
+            origin = origin_labels.get(event.event_record_origin, "")
+            record_status = status_labels.get(event.event_record_status, "")
+            if record_status:
+                details = "; ".join(
+                    part for part in (f"Record: {record_status}", details) if part
+                )
+        except (TypeError, ValueError):
+            origin = ""
+        append_record(
+            event.event_datetime,
+            "ELD Event",
+            description,
+            event.event_sequence_id_number,
+            origin,
+            details,
+        )
+
+    # Certification section: sequence, code, event date, event time, certified date...
+    for row in parse_result.sections.get(
+        "Driver's Certification/Recertification Actions", ()
+    ):
+        timestamp = parse_timestamp(row, 2, 3)
+        if timestamp is None or len(row) < 2:
+            continue
+        try:
+            code = int(row[1])
+        except ValueError:
+            continue
+        description = (
+            "First daily record certification" if code == 1
+            else f"Daily record recertification ({code})"
+        )
+        certified_date = row[4] if len(row) > 4 else ""
+        append_record(
+            timestamp, "Certification", description, row[0],
+            details=f"Certified record date: {certified_date}" if certified_date else "",
+        )
+
+    # Malfunctions and diagnostics: sequence, event code, diagnostic code, date, time...
+    for row in parse_result.sections.get("Malfunctions and Data Diagnostic Events", ()):
+        timestamp = parse_timestamp(row, 3, 4)
+        if timestamp is None or len(row) < 3:
+            continue
+        try:
+            code = int(row[1])
+        except ValueError:
+            continue
+        description = event_code_descriptions[7].get(
+            code, f"Malfunction/diagnostic event code {code}"
+        )
+        append_record(
+            timestamp, "Malfunction / Diagnostic", description, row[0],
+            details=f"Diagnostic code: {row[2]}" if row[2] else "",
+        )
+
+    # Login/logout: sequence, event code, username, event date, event time...
+    for row in parse_result.sections.get("ELD Login/Logout Report", ()):
+        timestamp = parse_timestamp(row, 3, 4)
+        if timestamp is None or len(row) < 3:
+            continue
+        try:
+            code = int(row[1])
+        except ValueError:
+            continue
+        description = {1: "Driver Login", 2: "Driver Logout"}.get(
+            code, f"Login/logout event code {code}"
+        )
+        append_record(
+            timestamp, "Login / Logout", description, row[0],
+            details=f"ELD username: {row[2]}" if row[2] else "",
+        )
+
+    # Engine section: sequence, event code, event date, event time...
+    engine_event_names = {
+        1: "Engine power-up (conventional location precision)",
+        2: "Engine power-up (reduced location precision)",
+        3: "Engine shut-down (conventional location precision)",
+        4: "Engine shut-down (reduced location precision)",
+    }
+    for row in parse_result.sections.get("CMV Engine Power-Up and Shut Down Activity", ()):
+        timestamp = parse_timestamp(row, 2, 3)
+        if timestamp is None or len(row) < 2:
+            continue
+        try:
+            code = int(row[1])
+        except ValueError:
+            continue
+        append_record(
+            timestamp, "Engine", engine_event_names.get(code, f"Engine event code {code}"),
+            row[0],
+        )
+
+    # The unidentified-profile event rows use the same 18-field layout as the main list.
+    for row in parse_result.sections.get("Unidentified Driver Profile Records", ()):
+        timestamp = parse_timestamp(row, 5, 6)
+        if timestamp is None or len(row) < ELD_EVENT_FIELD_COUNT:
+            continue
+        try:
+            event_status = int(row[1])
+            event_origin = int(row[2])
+            event_type = int(row[3])
+            event_code = int(row[4])
+        except ValueError:
+            continue
+        if event_type == 1:
+            description = code_to_duty_status.get(
+                event_code, f"Unknown duty status code {event_code}"
+            )
+        else:
+            description = event_code_descriptions.get(event_type, {}).get(
+                event_code,
+                f"{event_type_names.get(event_type, 'ELD event')} code {event_code}",
+            )
+        status_text = status_labels.get(event_status, f"Record status {event_status}")
+        origin_text = origin_labels.get(event_origin, f"Record origin {event_origin}")
+        details = f"Record: {status_text}; {annotations.get(row[0], '')}".rstrip("; ")
+        append_record(
+            timestamp, "Unidentified Driver", description, row[0], origin_text, details
+        )
+
+    if not records_by_day:
+        return {}
+
+    first_day, last_day = min(records_by_day), max(records_by_day)
+    current_day = first_day
+    while current_day <= last_day:
+        records_by_day.setdefault(current_day, [])
+        current_day += timedelta(days=1)
+
+    for daily_records in records_by_day.values():
+        daily_records.sort(key=lambda record: record.timestamp)
+    return dict(sorted(records_by_day.items()))
+
+
+def draw_daily_event_table(axis, events: list[DailyEventRecord]) -> None:
+    """Draw each event for a day in timestamp order on a Matplotlib axis."""
+    axis.axis("off")
+    axis.set_title("Events for the Day (timestamp order)", loc="left", fontsize=10, pad=4)
+    if not events:
+        axis.text(0.01, 0.5, "No event records for this day.", transform=axis.transAxes)
+        return
+
+    rows = [
+        [
+            event.timestamp.strftime("%H:%M:%S"),
+            event.category,
+            event.event,
+            event.sequence_id,
+            event.record_origin,
+            event.details,
+        ]
+        for event in events
+    ]
+    axis.table(
+        cellText=rows,
+        colLabels=["Time", "Category", "Event", "Sequence ID", "Record Origin", "Details"],
+        cellLoc="left",
+        colLoc="left",
+        loc="center",
+        colWidths=[0.09, 0.15, 0.25, 0.12, 0.17, 0.22],
+        bbox=[0, 0, 1, 1],
+    )
+
+
 def build_daily_timelines(
     events: list[ELDEvent],
     start_date: date | None = None,
@@ -367,11 +651,14 @@ def generate_daily_eld_charts(
         ) from exc
 
     parse_result = read_eld_csv(csv_path)
-    if not parse_result.events:
+    daily_event_records = build_daily_event_records(parse_result)
+    if not parse_result.events and not daily_event_records:
         return {}
 
-    # Include dates containing non-duty ELD events so they still receive a chart.
-    event_dates = [event.event_datetime.date() for event in parse_result.events]
+    # Dates include records stored in every output-file event segment.
+    event_dates = list(daily_event_records)
+    if not event_dates:
+        event_dates = [event.event_datetime.date() for event in parse_result.events]
     first_date, last_date = min(event_dates), max(event_dates)
     timelines = build_daily_timelines(
         parse_result.events, start_date=first_date, end_date=last_date
@@ -403,7 +690,14 @@ def generate_daily_eld_charts(
 
     chart_paths: dict[date, Path] = {}
     for chart_date, intervals in timelines.items():
-        fig, ax = plt.subplots(figsize=(11, 5.2))
+        daily_events = daily_event_records.get(chart_date, [])
+        table_height = max(1.0, (len(daily_events) + 1) * 0.24)
+        fig = plt.figure(figsize=(12, 5.0 + table_height))
+        grid = fig.add_gridspec(
+            2, 1, height_ratios=[4.5, table_height], hspace=0.38
+        )
+        ax = fig.add_subplot(grid[0])
+        event_table_axis = fig.add_subplot(grid[1])
         ax.set_xlim(0, 24)
         ax.set_ylim(-0.5, 3.5)
         ax.set_yticks([3, 2, 1, 0], [
@@ -472,6 +766,7 @@ def generate_daily_eld_charts(
         ax.set_xlabel("Hour of 24-hour period")
         ax.set_ylabel("Duty Status")
         ax.set_xticklabels([f"{hour:02d}:00" for hour in range(25)], rotation=45, ha="right")
+        draw_daily_event_table(event_table_axis, daily_events)
         fig.tight_layout()
 
         chart_path = destination / f"eld_chart_{chart_date.isoformat()}.png"

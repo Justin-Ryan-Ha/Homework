@@ -23,5 +23,8 @@ CSV. To choose another folder, pass `--output-dir`:
 python "FMCSA Log Generator.py" path/to/eld_file.csv --charts --output-dir path/to/output
 ```
 
-The chart plots active duty-status changes on a 24-hour grid. It is a daily
-graph, not a complete roadside ELD report.
+Each day's chart includes a timestamp-ordered table with one row per event
+record, including duty-status and intermediate events, login/logout activity,
+unidentified-driver records, certifications, engine activity, and malfunctions
+or diagnostics. The graph plots active duty-status changes on a 24-hour grid.
+This is a daily graph and event ledger, not a complete roadside ELD report.
