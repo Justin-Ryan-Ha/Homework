@@ -84,6 +84,74 @@ EVENT_TYPE_CODES = {
     "malfunction_diagnostic": 7,
 }
 
+# Readable labels used when building per-day event records and charts.
+EVENT_TYPE_NAMES = {
+    1: "Duty Status Change",
+    2: "Intermediate Log",
+    3: "Special Driving Category",
+}
+DUTY_STATUS_NAMES_BY_CODE = {
+    code: status.replace("_", " ").title()
+    for status, code in DUTY_STATUS_CODES.items()
+}
+DUTY_STATUS_CODES_BY_CODE = {
+    code: status for status, code in DUTY_STATUS_CODES.items()
+}
+EVENT_CODE_DESCRIPTIONS = {
+    2: {
+        1: "Intermediate log (conventional location precision)",
+        2: "Intermediate log (reduced location precision)",
+    },
+    3: {
+        0: "Special driving category cleared",
+        1: "Authorized personal use of CMV",
+        2: "Yard moves",
+    },
+    7: {
+        1: "ELD malfunction logged",
+        2: "ELD malfunction cleared",
+        3: "Data diagnostic event logged",
+        4: "Data diagnostic event cleared",
+    },
+}
+EVENT_RECORD_STATUS_NAMES = {
+    1: "Active",
+    2: "Inactive - Changed",
+    3: "Inactive - Change Requested",
+    4: "Inactive - Change Rejected",
+}
+EVENT_RECORD_ORIGIN_NAMES = {
+    code: label.replace("_", " ").title()
+    for label, code in EVENT_RECORD_ORIGIN_CODES.items()
+}
+ENGINE_EVENT_NAMES = {
+    1: "Engine power-up (conventional location precision)",
+    2: "Engine power-up (reduced location precision)",
+    3: "Engine shut-down (conventional location precision)",
+    4: "Engine shut-down (reduced location precision)",
+}
+LOGIN_LOGOUT_EVENT_NAMES = {1: "Driver Login", 2: "Driver Logout"}
+
+# Chart display configuration keyed by the normalized duty-status label.
+CHART_ROW_FOR_STATUS = {
+    "off_duty": 3,
+    "sleeper_berth": 2,
+    "driving": 1,
+    "on_duty_not_driving": 0,
+}
+CHART_LABEL_FOR_STATUS = {
+    "off_duty": "Off Duty",
+    "sleeper_berth": "Sleeper Berth",
+    "driving": "Driving",
+    "on_duty_not_driving": "On Duty Not Driving",
+}
+CHART_COLOR_FOR_STATUS = {
+    "off_duty": "#2563eb",
+    "sleeper_berth": "#7c3aed",
+    "driving": "#dc2626",
+    "on_duty_not_driving": "#d97706",
+}
+
 
 @dataclass(frozen=True)
 class ELDEvent:
@@ -312,43 +380,6 @@ def build_daily_event_records(
             )
         )
 
-    event_type_names = {
-        1: "Duty Status Change",
-        2: "Intermediate Log",
-        3: "Special Driving Category",
-    }
-    code_to_duty_status = {
-        code: status.replace("_", " ").title()
-        for status, code in DUTY_STATUS_CODES.items()
-    }
-    event_code_descriptions = {
-        2: {
-            1: "Intermediate log (conventional location precision)",
-            2: "Intermediate log (reduced location precision)",
-        },
-        3: {
-            0: "Special driving category cleared",
-            1: "Authorized personal use of CMV",
-            2: "Yard moves",
-        },
-        7: {
-            1: "ELD malfunction logged",
-            2: "ELD malfunction cleared",
-            3: "Data diagnostic event logged",
-            4: "Data diagnostic event cleared",
-        },
-    }
-    status_labels = {
-        1: "Active",
-        2: "Inactive - Changed",
-        3: "Inactive - Change Requested",
-        4: "Inactive - Change Rejected",
-    }
-    origin_labels = {
-        code: label.replace("_", " ").title()
-        for label, code in EVENT_RECORD_ORIGIN_CODES.items()
-    }
-
     # Attach comments and manual location descriptions to their source event ID.
     annotations: dict[str, str] = {}
     for row in parse_result.sections.get("ELD Event Annotations or Comments", ()):
@@ -365,19 +396,19 @@ def build_daily_event_records(
     # Main event list: event sequence, status, origin, type, code, date, time...
     for event in parse_result.events:
         if event.event_type == 1:
-            description = code_to_duty_status.get(
+            description = DUTY_STATUS_NAMES_BY_CODE.get(
                 event.event_code, f"Unknown duty status code {event.event_code}"
             )
         else:
-            description = event_code_descriptions.get(event.event_type, {}).get(
+            description = EVENT_CODE_DESCRIPTIONS.get(event.event_type, {}).get(
                 event.event_code,
-                f"{event_type_names.get(event.event_type, 'ELD event')} code "
+                f"{EVENT_TYPE_NAMES.get(event.event_type, 'ELD event')} code "
                 f"{event.event_code}",
             )
         details = annotations.get(event.event_sequence_id_number, "")
         try:
-            origin = origin_labels.get(event.event_record_origin, "")
-            record_status = status_labels.get(event.event_record_status, "")
+            origin = EVENT_RECORD_ORIGIN_NAMES.get(event.event_record_origin, "")
+            record_status = EVENT_RECORD_STATUS_NAMES.get(event.event_record_status, "")
             if record_status:
                 details = "; ".join(
                     part for part in (f"Record: {record_status}", details) if part
@@ -423,7 +454,7 @@ def build_daily_event_records(
             code = int(row[1])
         except ValueError:
             continue
-        description = event_code_descriptions[7].get(
+        description = EVENT_CODE_DESCRIPTIONS[7].get(
             code, f"Malfunction/diagnostic event code {code}"
         )
         append_record(
@@ -440,7 +471,7 @@ def build_daily_event_records(
             code = int(row[1])
         except ValueError:
             continue
-        description = {1: "Driver Login", 2: "Driver Logout"}.get(
+        description = LOGIN_LOGOUT_EVENT_NAMES.get(
             code, f"Login/logout event code {code}"
         )
         append_record(
@@ -449,12 +480,6 @@ def build_daily_event_records(
         )
 
     # Engine section: sequence, event code, event date, event time...
-    engine_event_names = {
-        1: "Engine power-up (conventional location precision)",
-        2: "Engine power-up (reduced location precision)",
-        3: "Engine shut-down (conventional location precision)",
-        4: "Engine shut-down (reduced location precision)",
-    }
     for row in parse_result.sections.get("CMV Engine Power-Up and Shut Down Activity", ()):
         timestamp = parse_timestamp(row, 2, 3)
         if timestamp is None or len(row) < 2:
@@ -464,7 +489,7 @@ def build_daily_event_records(
         except ValueError:
             continue
         append_record(
-            timestamp, "Engine", engine_event_names.get(code, f"Engine event code {code}"),
+            timestamp, "Engine", ENGINE_EVENT_NAMES.get(code, f"Engine event code {code}"),
             row[0],
         )
 
@@ -481,16 +506,20 @@ def build_daily_event_records(
         except ValueError:
             continue
         if event_type == 1:
-            description = code_to_duty_status.get(
+            description = DUTY_STATUS_NAMES_BY_CODE.get(
                 event_code, f"Unknown duty status code {event_code}"
             )
         else:
-            description = event_code_descriptions.get(event_type, {}).get(
+            description = EVENT_CODE_DESCRIPTIONS.get(event_type, {}).get(
                 event_code,
-                f"{event_type_names.get(event_type, 'ELD event')} code {event_code}",
+                f"{EVENT_TYPE_NAMES.get(event_type, 'ELD event')} code {event_code}",
             )
-        status_text = status_labels.get(event_status, f"Record status {event_status}")
-        origin_text = origin_labels.get(event_origin, f"Record origin {event_origin}")
+        status_text = EVENT_RECORD_STATUS_NAMES.get(
+            event_status, f"Record status {event_status}"
+        )
+        origin_text = EVENT_RECORD_ORIGIN_NAMES.get(
+            event_origin, f"Record origin {event_origin}"
+        )
         details = f"Record: {status_text}; {annotations.get(row[0], '')}".rstrip("; ")
         append_record(
             timestamp, "Unidentified Driver", description, row[0], origin_text, details
@@ -562,7 +591,6 @@ def build_daily_timelines(
         return {}
 
     # Convert FMCSA event codes (1–4) to readable duty-status labels.
-    code_to_status = {code: status for status, code in DUTY_STATUS_CODES.items()}
     events_by_date: dict[date, list[ELDEvent]] = {}
     for event in active_events:
         events_by_date.setdefault(event.event_datetime.date(), []).append(event)
@@ -601,7 +629,7 @@ def build_daily_timelines(
 
         for event in day_events:
             try:
-                next_status = code_to_status[event.event_code]
+                next_status = DUTY_STATUS_CODES_BY_CODE[event.event_code]
             except KeyError as exc:
                 raise ValueError(
                     f"Event {event.event_sequence_id_number} has unknown duty-status "
@@ -669,25 +697,6 @@ def generate_daily_eld_charts(
     destination.mkdir(parents=True, exist_ok=True)
 
     # Place the chart rows in conventional order, with Off Duty at the top.
-    row_for_status = {
-        "off_duty": 3,
-        "sleeper_berth": 2,
-        "driving": 1,
-        "on_duty_not_driving": 0,
-    }
-    label_for_status = {
-        "off_duty": "Off Duty",
-        "sleeper_berth": "Sleeper Berth",
-        "driving": "Driving",
-        "on_duty_not_driving": "On Duty Not Driving",
-    }
-    color_for_status = {
-        "off_duty": "#2563eb",
-        "sleeper_berth": "#7c3aed",
-        "driving": "#dc2626",
-        "on_duty_not_driving": "#d97706",
-    }
-
     chart_paths: dict[date, Path] = {}
     for chart_date, intervals in timelines.items():
         daily_events = daily_event_records.get(chart_date, [])
@@ -700,12 +709,15 @@ def generate_daily_eld_charts(
         event_table_axis = fig.add_subplot(grid[1])
         ax.set_xlim(0, 24)
         ax.set_ylim(-0.5, 3.5)
-        ax.set_yticks([3, 2, 1, 0], [
-            label_for_status["off_duty"],
-            label_for_status["sleeper_berth"],
-            label_for_status["driving"],
-            label_for_status["on_duty_not_driving"],
-        ])
+        ax.set_yticks(
+            [3, 2, 1, 0],
+            [
+                CHART_LABEL_FOR_STATUS["off_duty"],
+                CHART_LABEL_FOR_STATUS["sleeper_berth"],
+                CHART_LABEL_FOR_STATUS["driving"],
+                CHART_LABEL_FOR_STATUS["on_duty_not_driving"],
+            ],
+        )
         ax.set_xticks(range(25))
         # Quarter-hour minor lines make it easier to read short duty intervals.
         ax.set_xticks([quarter / 4 for quarter in range(97)], minor=True)
@@ -716,19 +728,19 @@ def generate_daily_eld_charts(
 
         prior_interval = None
         for interval in intervals:
-            y = row_for_status[interval.status]
+            y = CHART_ROW_FOR_STATUS[interval.status]
             ax.hlines(
                 y,
                 interval.start_hour,
                 interval.end_hour,
-                color=color_for_status[interval.status],
+                color=CHART_COLOR_FOR_STATUS[interval.status],
                 linewidth=7,
                 zorder=3,
             )
             if prior_interval is not None and prior_interval.status != interval.status:
                 ax.vlines(
                     interval.start_hour,
-                    row_for_status[prior_interval.status],
+                    CHART_ROW_FOR_STATUS[prior_interval.status],
                     y,
                     color="#1f2937",
                     linewidth=1.5,
@@ -741,9 +753,8 @@ def generate_daily_eld_charts(
             event for event in chart_events
             if event.event_datetime.date() == chart_date
         ]
-        code_to_status = {code: status for status, code in DUTY_STATUS_CODES.items()}
         for event in day_events:
-            resulting_status = code_to_status.get(event.event_code)
+            resulting_status = DUTY_STATUS_CODES_BY_CODE.get(event.event_code)
             if resulting_status is None:
                 continue
             event_hour = (
@@ -753,7 +764,7 @@ def generate_daily_eld_charts(
             )
             ax.plot(
                 event_hour,
-                row_for_status[resulting_status],
+                CHART_ROW_FOR_STATUS[resulting_status],
                 marker="o",
                 markersize=4,
                 markerfacecolor="white",
