@@ -633,6 +633,7 @@ def build_daily_timelines(
 
 
 def generate_daily_eld_charts(
+    parse_result: ELDParseResult,
     csv_path: str | Path,
     output_dir: str | Path | None = None,
 ) -> dict[date, Path]:
@@ -650,7 +651,6 @@ def generate_daily_eld_charts(
             "with `python -m pip install -r requirements.txt`."
         ) from exc
 
-    parse_result = read_eld_csv(csv_path)
     daily_event_records = build_daily_event_records(parse_result)
     if not parse_result.events and not daily_event_records:
         return {}
@@ -818,7 +818,9 @@ def main() -> int:
 
     if args.charts:
         try:
-            chart_paths = generate_daily_eld_charts(args.csv_file, args.output_dir)
+            chart_paths = generate_daily_eld_charts(
+                result, args.csv_file, args.output_dir
+            )
         except RuntimeError as exc:
             parser.error(str(exc))
         if chart_paths:
