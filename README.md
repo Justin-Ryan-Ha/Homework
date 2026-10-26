@@ -16,6 +16,16 @@ python -m pip install -r requirements.txt
 python "FMCSA Log Generator.py" path/to/eld_file.csv --charts
 ```
 
+If you want to use a short filename instead of a full path, place the CSV in
+the same folder where you run the command. For example, if the CSV is named
+`driver_logs.csv` and is in the project folder, run:
+
+```bash
+python "FMCSA Log Generator.py" driver_logs.csv --charts
+```
+
+You can also provide a relative or absolute path to a CSV stored elsewhere.
+
 By default, PNG charts are saved in an `eld_charts` folder beside the input
 CSV. To choose another folder, pass `--output-dir`:
 
